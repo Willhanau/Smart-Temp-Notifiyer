@@ -1,8 +1,41 @@
 #include "mbed.h"
 #include "https_request.h"
+#include "http_request.h"
+#include "rtos.h"
 
 DigitalOut myled(LED1);
 WiFiInterface *wifi;
+
+//Threads
+Thread temp_Thread;
+Thread buttons_Thread;
+Thread schedule_twilio_Thread;
+
+//Variables for temperature sensor DS1631
+I2C temp_sensor(I2C_SDA, I2C_SCL);
+const int temp_addr = 0x90;
+//0x51 -> Start Convert Temp
+//0xAA -> Read Temp
+const char cmd[] = {0x51, 0xAA};
+char read_temp[2];
+float temp = 0;
+
+//Input Buttons
+DigitalIn hour_Button(PB_4);
+DigitalIn minute_Button(PB_5);
+DigitalIn set_Button(PB_3);
+DigitalIn query_Button(PA_10);
+DigitalIn onboard_Button(USER_BUTTON);
+
+//Variables
+int current_b = 0;
+int previous_b = 0;
+int notify_time[] = {0, 0};
+int set_notify_time[2];
+int classify = 0;
+
+const char body[] = "{\"requests\": [{\"image\": {\"source\": {\"imageUri\": \"https://cloud.google.com/vision/images/rushmore.jpg\"}}, \"features\": [{\"type\": \"LABEL_DETECTION\", \"maxResults\": 5}]}]}";
+const char body2[] = "{\"requests\": [{\"image\": {\"source\": {\"imageUri\": \"https://storage.googleapis.com/wh-images/Person.jpg\"}}, \"features\": [{\"type\": \"LABEL_DETECTION\", \"maxResults\": 5}]}]}";
 
 const char SSL_CA_PEM[] = "-----BEGIN CERTIFICATE-----\n"
                         "MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh\n"
@@ -49,6 +82,8 @@ const char SSL_CA_PEM[] = "-----BEGIN CERTIFICATE-----\n"
                         "TBj0/VLZjmmx6BEP3ojY+x1J96relc8geMJgEtslQIxq/H5COEBkEveegeGTLg==\n"
                         "-----END CERTIFICATE-----\n";
 
+
+
 void Blink_LED(){
     while(1) {
         myled = 1; // LED is ON
@@ -76,13 +111,14 @@ int Connect_to_Wifi(WiFiInterface *wifi){
     return 1;
 }
 
-void Twilio_https_Request(NetworkInterface *network){
-    printf("\n\nSending Twilio a https request!\n\n");
+void Google_Cloud_Vision_https_Request(NetworkInterface *network){
+    printf("\n\nSending Google Cloud Vision a https request!\n\n");
     
-    HttpsRequest* request = new HttpsRequest(network, SSL_CA_PEM, HTTP_POST, MBED_CONF_APP_TWILIO_API_URL);
-    request->set_header("Content-Type", "application/x-www-form-urlencoded");
-    request->set_header("Authorization", MBED_CONF_APP_TWILIO_BASIC_AUTH);
-    HttpResponse* response = request->send(MBED_CONF_APP_TWILIO_REQUEST_BODY, strlen(MBED_CONF_APP_TWILIO_REQUEST_BODY));
+    HttpsRequest* request = new HttpsRequest(network, SSL_CA_PEM, HTTP_POST, MBED_CONF_APP_GC_VISION_API_URL);
+    request->set_header("Content-Type", "application/json");
+    HttpResponse* response;
+    if(classify == 0) response = request->send(body, strlen(body));
+    if(classify == 1) response = request->send(body2, strlen(body2));
     
     //Print Http Response
     printf("Status: %d - %s\n", response->get_status_code(), response->get_status_message().c_str());
@@ -92,16 +128,22 @@ void Twilio_https_Request(NetworkInterface *network){
     }
     printf("\nBody (%lu bytes):\n\n%s\n", response->get_body_length(), response->get_body_as_string().c_str());
     
+    classify = !classify;
     delete request;
 }
 
-void Google_Cloud_Vision_https_Request(NetworkInterface *network){
-    printf("\n\nSending Google Cloud Vision a https request!\n\n");
+void Twilio_https_Request(NetworkInterface *network){
+    printf("\n\nSending Twilio a https request!\n\n");
     
-    HttpsRequest* request = new HttpsRequest(network, SSL_CA_PEM, HTTP_POST, MBED_CONF_APP_GC_VISION_API_URL);
-    request->set_header("Content-Type", "application/json");
+    HttpsRequest* request = new HttpsRequest(network, SSL_CA_PEM, HTTP_POST, MBED_CONF_APP_TWILIO_API_URL);
+    request->set_header("Content-Type", "application/x-www-form-urlencoded");
+    request->set_header("Authorization", MBED_CONF_APP_TWILIO_BASIC_AUTH);
     
-    const char body[] = "{\"requests\": [{\"image\": {\"source\": {\"imageUri\": \"https://cloud.google.com/vision/images/rushmore.jpg\"}}, \"features\": [{\"type\": \"LABEL_DETECTION\", \"maxResults\": 5}]}]}";
+    //Please enter your phone number(country code, area code, number) and twilio phone number where the Xs are
+    char body[200] = "To=%2BXXXXXXXXXXX&From=%2BXXXXXXXXXXX&MediaUrl=https%3A%2F%2Fdemo.twilio.com%2Fowl.png&Body=";
+    char tmp[50];
+    sprintf(tmp, "Current temperature:+%.2f+Celsius", temp);
+    strcat(body, tmp);
     HttpResponse* response = request->send(body, strlen(body));
     
     //Print Http Response
@@ -115,8 +157,136 @@ void Google_Cloud_Vision_https_Request(NetworkInterface *network){
     delete request;
 }
 
+void get_Temperature(){
+    while(1){
+        myled = 1; // LED is ON
+        //Send command to Start convert temp
+        temp_sensor.write(temp_addr, &cmd[0], 1);
+        
+        //Send command to read temp
+        temp_sensor.write(temp_addr, &cmd[1], 1);
+        
+        //read temp sensor
+        temp_sensor.read(temp_addr, read_temp, 2);
+        
+        //Convert temperature to Celsius
+        temp = (float((read_temp[0] << 8) | read_temp[1]) / 256);
+        myled = 0; // LED is OFF
+        wait(2);
+    }
+}
+
+void scheduled_Twilio_Request(){
+    while(1){
+        wait((3600 * set_notify_time[0]) + (60 * set_notify_time[1]));
+        Twilio_https_Request(wifi);
+    }
+}
+
+void increment_hour(){
+    notify_time[0]++;
+    notify_time[0] %= 24;
+    
+    if(notify_time[1] < 10){
+        printf("\f\n24-hour-Time (hours:minutes):\n%d:0%d\n", notify_time[0], notify_time[1]);
+    } else {
+        printf("\f\n24-hour-Time (hours:minutes):\n%d:%d\n", notify_time[0], notify_time[1]);
+    }
+}
+
+void increment_minute(){
+    notify_time[1]++;
+    notify_time[1] %= 60;
+    
+    if(notify_time[1] < 10){
+        printf("\f\n24-hour-Time (hours:minutes):\n%d:0%d\n", notify_time[0], notify_time[1]);
+    } else {
+        printf("\f\n24-hour-Time (hours:minutes):\n%d:%d\n", notify_time[0], notify_time[1]);
+    }
+}
+
+void set_notification_time(){
+    //Prompt user to set a time if hours and minutes is not at least greater than 0
+    if((notify_time[0] != 0) || (notify_time[1] != 0)){
+        //set scheduled time
+        set_notify_time[0] = notify_time[0];
+        set_notify_time[1] = notify_time[1];
+        
+        if(set_notify_time[1] < 10){
+            printf("\f\nNotification time has been set for (hours:minutes):\n%d:0%d\n", set_notify_time[0], set_notify_time[1]);
+        } else {
+            printf("\f\nNotification time has been set for (hours:minutes):\n%d:%d\n", set_notify_time[0], set_notify_time[1]);
+        }
+        
+        //Start event
+        schedule_twilio_Thread.start(scheduled_Twilio_Request);
+    } else {
+        printf("\f\nPlease set a time that is not 0 hours and 0 mins.\n");
+    }
+}
+
+void print_current_temp_and_notify_time(){
+    printf("\f\nCurrent temperature:\n%.2f Celsius\n", temp);
+    if(set_notify_time[1] < 10){
+        printf("\nCurrent notification time is set for (hours:minutes):\n%d:0%d\n", set_notify_time[0], set_notify_time[1]);
+    } else {
+        printf("\nCurrent notification time is set for (hours:minutes):\n%d:%d\n", set_notify_time[0], set_notify_time[1]);
+    }
+}
+
+void input_Buttons_Loop(){
+    while(1){
+        
+        if(!hour_Button){
+            previous_b = current_b;
+            current_b = 1;
+            if(previous_b != current_b){
+                increment_hour();
+                wait(0.1);
+            }
+        }
+        else if(!minute_Button){
+            previous_b = current_b;
+            current_b = 2;
+            if(previous_b != current_b){
+                increment_minute();
+                wait(0.1);
+            }
+        }
+        else if(!set_Button){
+            previous_b = current_b;
+            current_b = 3;
+            if(previous_b != current_b){
+                set_notification_time();
+                wait(0.1);
+            }
+        }
+        else if(!query_Button){
+            previous_b = current_b;
+            current_b = 4;
+            if(previous_b != current_b){
+                print_current_temp_and_notify_time();
+                wait(0.1);
+            }
+        }
+        else if(!onboard_Button){
+            previous_b = current_b;
+            current_b = 5;
+            if(previous_b != current_b){
+                Google_Cloud_Vision_https_Request(wifi);
+                wait(0.1);
+            }
+        }
+        else{
+            previous_b = current_b;
+            current_b = 0;
+        }
+    }   
+}
+
+
 int main() {
-    printf("\fSmart Security Cam V1.0\n");
+    printf("\fSmart Temp Notifyer V2.0\n");
 
 #ifdef MBED_MAJOR_VERSION
     printf("Mbed OS version %d.%d.%d\n\n", MBED_MAJOR_VERSION, MBED_MINOR_VERSION, MBED_PATCH_VERSION);
@@ -136,16 +306,11 @@ int main() {
         printf("\nConnection to wifi FAILED...\n");        
     }
     
-    //Send a http request to the Twilio REST API
-    Twilio_https_Request(wifi);
-    
-    //Send a http request to the Twilio REST API
-    Google_Cloud_Vision_https_Request(wifi);
-    
     //Disconnect from wifi access point
-    wifi->disconnect();
-    printf("\nDone: Wifi has successfully disconnected.\n");
+    //wifi->disconnect();
+    //printf("\nDone: Wifi has successfully disconnected.\n");
     
+    temp_Thread.start(get_Temperature);
+    buttons_Thread.start(input_Buttons_Loop);
     
-    Blink_LED();
 }

@@ -16,10 +16,6 @@
             "help": "Twilio Basic Auth",
             "value": "\"Basic YOUR_BASIC_AUTH_STRING_HERE\""
         },
-        "twilio-request-body": {
-            "help": "Twilio x-www-form-urlencoded Request Body",
-            "value": "\"To=%2BYOUR_PHONE_NUMBER_HERE&From=%2BTWILIO_PHONE_NUMBER_HERE&MediaUrl=https%3A%2F%2Fdemo.twilio.com%2Fowl.png&Body=Hello+From+Nucleo+Board!\""
-        },
         "gc-vision-api-url": {
             "help": "Google Cloud Vision API URL",
             "value": "\"https://vision.googleapis.com/v1/images:annotate?key=YOUR_API_KEY_HERE\""
