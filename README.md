@@ -86,5 +86,5 @@ Twilio SMS API: https://www.twilio.com/docs/sms/send-messages
 
 Google Vision API: https://cloud.google.com/vision/docs/request#providing_the_image
 
-#Quick Demo Video
+# Quick Demo Video
 https://www.youtube.com/watch?v=4Rnvl_b0wuE
